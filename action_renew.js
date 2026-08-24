@@ -725,6 +725,11 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 // --------------------------------------------
 
                 await page.getByRole('button', { name: 'Login', exact: true }).click();
+                await page.waitForTimeout(3000);
+                try {
+                    await page.waitForURL(/dashboard|auth/, { timeout: 15000 });
+                } catch (e) { }
+                console.log(`   >> 登录后 URL: ${page.url()}`);
 
                 // User Request: Check for incorrect password
                 try {
@@ -749,11 +754,20 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
 
             console.log('正在寻找 "See" 链接...');
             try {
-                await page.getByRole('link', { name: 'See' }).first().waitFor({ timeout: 15000 });
+                await page.getByRole('link', { name: 'See' }).first().waitFor({ timeout: 20000 });
                 await page.waitForTimeout(1000);
                 await page.getByRole('link', { name: 'See' }).first().click();
             } catch (e) {
                 console.log('未找到 "See" 按钮。');
+                console.log(`   >> 当前 URL: ${page.url()}`);
+                console.log(`   >> 当前标题: ${await page.title().catch(() => '')}`);
+                const failPhotoDir = path.join(process.cwd(), 'screenshots');
+                if (!fs.existsSync(failPhotoDir)) fs.mkdirSync(failPhotoDir, { recursive: true });
+                const failSafeName = user.username.replace(/[^a-z0-9]/gi, '_');
+                const failShotPath = path.join(failPhotoDir, `${failSafeName}_no_see.png`);
+                try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (se) { }
+                const bodyText = await page.locator('body').innerText().catch(() => '');
+                console.log(`   >> 页面文本: ${bodyText.slice(0, 800)}`);
                 continue;
             }
 
