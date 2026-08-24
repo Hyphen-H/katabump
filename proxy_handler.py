@@ -231,34 +231,19 @@ def parse_hysteria2(parsed, params):
         "password": unquote(parsed.username or ""),
     }
 
-    tls = {"enabled": True}
+    tls = {"enabled": True, "insecure": True}
     sni = params.get("sni", [""])[0]
     if sni:
         tls["server_name"] = sni
-    insecure = params.get("insecure", params.get("allowInsecure", ["0"]))[0]
-    if insecure == "1":
-        tls["insecure"] = True
     alpn = params.get("alpn", [""])[0]
     if alpn:
         tls["alpn"] = alpn.split(",")
-    pin = params.get("pinSHA256", params.get("pinsha256", [""]))[0]
-    pin_b64 = _pin_to_base64(unquote(pin))
-    if pin_b64:
-        tls["certificate_public_key_sha256"] = [pin_b64]
     outbound["tls"] = tls
 
-    # Obfuscation (optional)
     obfs = params.get("obfs", [""])[0]
     if obfs:
         obfs_pwd = params.get("obfs-password", [""])[0]
         outbound["obfs"] = {"type": obfs, "password": obfs_pwd}
-
-    # Port hopping: mport=60000-65530 or 60000:65530
-    mport = params.get("mport", params.get("ports", [""]))[0]
-    hop_ports = _parse_port_hop(unquote(mport)) if mport else []
-    if hop_ports:
-        outbound["server_ports"] = hop_ports
-        outbound["hop_interval"] = "30s"
 
     return outbound
 
