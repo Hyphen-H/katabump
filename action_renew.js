@@ -251,6 +251,109 @@ async function launchChrome() {
     }
 }
 
+function saveShot(page, filename) {
+    const photoDir = path.join(process.cwd(), 'screenshots');
+    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
+    const shotPath = path.join(photoDir, filename);
+    return page.screenshot({ path: shotPath, fullPage: true }).then(() => shotPath).catch(() => null);
+}
+
+async function solveLoginTurnstile(page) {
+    console.log('   >> 正在登录前检查 Turnstile (使用 CDP 绕过)...');
+    let cdpClickResult = false;
+    for (let findAttempt = 0; findAttempt < 15; findAttempt++) {
+        cdpClickResult = await attemptTurnstileCdp(page);
+        if (cdpClickResult) break;
+        await page.waitForTimeout(1000);
+    }
+
+    if (cdpClickResult) {
+        console.log('   >> 登录 CDP 点击生效。正在等待最多 10秒 Cloudflare 成功标志...');
+        for (let waitSec = 0; waitSec < 10; waitSec++) {
+            const frames = page.frames();
+            for (const f of frames) {
+                if (f.url().includes('cloudflare')) {
+                    try {
+                        if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
+                            console.log('   >> 登录前 Turnstile 验证成功。');
+                            return true;
+                        }
+                    } catch (e) { }
+                }
+            }
+            await page.waitForTimeout(1000);
+        }
+    } else {
+        console.log('   >> 登录前未检测到或未点击 Turnstile，继续操作...');
+    }
+    return cdpClickResult;
+}
+
+async function loginWithDiscord(page, user) {
+    console.log('使用 Discord 登录...');
+    const discordEntry = page.getByRole('link', { name: /Login with Discord/i })
+        .or(page.getByRole('button', { name: /Login with Discord/i }))
+        .or(page.locator('a[href*="discord"]'));
+    await discordEntry.first().waitFor({ state: 'visible', timeout: 15000 });
+    await discordEntry.first().click();
+
+    try {
+        await page.waitForURL(/discord\.com/, { timeout: 30000 });
+    } catch (e) {
+        console.log(`   >> 未跳转到 Discord，当前 URL: ${page.url()}`);
+        return false;
+    }
+    console.log(`   >> Discord URL: ${page.url()}`);
+
+    const authorizeBtn = page.getByRole('button', { name: /^Authorize$/i });
+    if (await authorizeBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
+        console.log('   >> 已登录 Discord，点击 Authorize...');
+        await authorizeBtn.click();
+        await page.waitForURL(/katabump\.com/, { timeout: 30000 });
+        return !page.url().includes('/auth/login');
+    }
+
+    const emailInput = page.locator('input[name="email"]').first();
+    await emailInput.waitFor({ state: 'visible', timeout: 20000 });
+    await emailInput.fill(user.username);
+    const pwdInput = page.locator('input[name="password"]').first();
+    await pwdInput.fill(user.password);
+    await page.locator('button[type="submit"]').first().click();
+    console.log('   >> 已提交 Discord 账号密码');
+
+    const deadline = Date.now() + 40000;
+    while (Date.now() < deadline) {
+        const url = page.url();
+        if (/katabump\.com/.test(url) && !/\/auth\/login/.test(url)) {
+            console.log(`   >> Discord 回调成功: ${url}`);
+            return true;
+        }
+
+        if (await authorizeBtn.isVisible().catch(() => false)) {
+            console.log('   >> 点击 Discord Authorize...');
+            await authorizeBtn.click();
+            try { await page.waitForURL(/katabump\.com/, { timeout: 30000 }); } catch (e) { }
+            return /katabump\.com/.test(page.url()) && !/\/auth\/login/.test(page.url());
+        }
+
+        const totpInput = page.locator('input[name="code"], input[autocomplete="one-time-code"]').first();
+        if (await totpInput.isVisible().catch(() => false)) {
+            console.error('   >> Discord 需要 2FA，USERS_JSON 里没有 totp，无法继续');
+            return false;
+        }
+
+        if (await page.getByText(/Login or password is invalid|Invalid login|密码无效/i).isVisible().catch(() => false)) {
+            console.error('   >> Discord 账号或密码错误');
+            return false;
+        }
+
+        await page.waitForTimeout(1000);
+    }
+
+    console.log(`   >> Discord 登录超时，当前 URL: ${page.url()}`);
+    return false;
+}
+
 function getUsers() {
     // 从环境变量读取 JSON 字符串
     // GitHub Actions Secret: USERS_JSON = [{"username":..., "password":...}]
@@ -680,76 +783,21 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 await page.goto('https://dashboard.katabump.com/auth/login');
             }
 
-            console.log('正在输入凭据...');
             try {
-                const emailInput = page.getByRole('textbox', { name: 'Email' });
-                await emailInput.waitFor({ state: 'visible', timeout: 5000 });
-                await emailInput.fill(user.username);
-                const pwdInput = page.getByRole('textbox', { name: 'Password' });
-                await pwdInput.fill(user.password);
-                await page.waitForTimeout(500);
-
-                // --- Cloudflare Turnstile Bypass for Login ---
-                console.log('   >> 正在登录前检查 Turnstile (使用 CDP 绕过)...');
-                let cdpClickResult = false;
-                for (let findAttempt = 0; findAttempt < 15; findAttempt++) {
-                    cdpClickResult = await attemptTurnstileCdp(page);
-                    if (cdpClickResult) break;
-                    await page.waitForTimeout(1000);
-                }
-
-                if (cdpClickResult) {
-                    console.log('   >> 登录 CDP 点击生效。正在等待最多 10秒 Cloudflare 成功标志...');
-                    for (let waitSec = 0; waitSec < 10; waitSec++) {
-                        const frames = page.frames();
-                        let isSuccess = false;
-                        for (const f of frames) {
-                            if (f.url().includes('cloudflare')) {
-                                try {
-                                    if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
-                                        isSuccess = true;
-                                        break;
-                                    }
-                                } catch (e) { }
-                            }
-                        }
-                        if (isSuccess) {
-                            console.log('   >> 登录前 Turnstile 验证成功。');
-                            break;
-                        }
-                        await page.waitForTimeout(1000);
-                    }
-                } else {
-                    console.log('   >> 登录前未检测到或未点击 Turnstile，继续操作...');
-                }
-                // --------------------------------------------
-
-                await page.getByRole('button', { name: 'Login', exact: true }).click();
-                await page.waitForTimeout(3000);
-                try {
-                    await page.waitForURL(/dashboard|auth/, { timeout: 15000 });
-                } catch (e) { }
+                await solveLoginTurnstile(page);
+                const loggedIn = await loginWithDiscord(page, user);
                 console.log(`   >> 登录后 URL: ${page.url()}`);
-
-                // User Request: Check for incorrect password
-                try {
-                    const errorMsg = page.getByText('Incorrect password or no account');
-        if (await errorMsg.isVisible({ timeout: 3000 })) {
-          console.error(` >> ❌ 登录失败: 用户 ${user.username} 账号或密码错误`);
-          const failPhotoDir = path.join(process.cwd(), 'screenshots');
-          if (!fs.existsSync(failPhotoDir)) fs.mkdirSync(failPhotoDir, { recursive: true });
-          const failSafeName = user.username.replace(/[^a-z0-9]/gi, '_');
-          const failShotPath = path.join(failPhotoDir, `${failSafeName}_login_fail.png`);
-          try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
-
-          await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n原因: 账号或密码错误`, failShotPath);
-
-                        continue;
-                    }
-                } catch (e) { }
-
+                if (!loggedIn) {
+                    const failSafeName = user.username.replace(/[^a-z0-9]/gi, '_');
+                    const failShotPath = await saveShot(page, `${failSafeName}_login_fail.png`);
+                    await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n原因: Discord 登录未完成\nURL: ${page.url()}`, failShotPath);
+                    continue;
+                }
             } catch (e) {
                 console.log('登录错误:', e.message);
+                const failSafeName = user.username.replace(/[^a-z0-9]/gi, '_');
+                await saveShot(page, `${failSafeName}_login_error.png`);
+                continue;
             }
 
             console.log('正在寻找 "See" 链接...');
@@ -761,11 +809,8 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 console.log('未找到 "See" 按钮。');
                 console.log(`   >> 当前 URL: ${page.url()}`);
                 console.log(`   >> 当前标题: ${await page.title().catch(() => '')}`);
-                const failPhotoDir = path.join(process.cwd(), 'screenshots');
-                if (!fs.existsSync(failPhotoDir)) fs.mkdirSync(failPhotoDir, { recursive: true });
                 const failSafeName = user.username.replace(/[^a-z0-9]/gi, '_');
-                const failShotPath = path.join(failPhotoDir, `${failSafeName}_no_see.png`);
-                try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (se) { }
+                await saveShot(page, `${failSafeName}_no_see.png`);
                 const bodyText = await page.locator('body').innerText().catch(() => '');
                 console.log(`   >> 页面文本: ${bodyText.slice(0, 800)}`);
                 continue;
@@ -854,16 +899,10 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                     if (await confirmBtn.isVisible()) {
 
                         // User Requested: Screenshot BEFORE final click
-                        const fs = require('fs');
-                        const path = require('path');
-                        const photoDir = path.join(process.cwd(), 'screenshots');
-                        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
                         const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
                         const tsScreenshotName = `${safeUser}_Turnstile_${attempt}.png`;
-                        try {
-                            await page.screenshot({ path: path.join(photoDir, tsScreenshotName), fullPage: true });
-                            console.log(`   >> 📸 快照已保存: ${tsScreenshotName}`);
-                        } catch (e) { }
+                        await saveShot(page, tsScreenshotName);
+                        console.log(`   >> 快照已保存: ${tsScreenshotName}`);
 
                         // User Request: 找不到的话这个循环直接下一步点击renew，然后检测有没有Please complete the captcha to continue
                         console.log('   >> 点击 Renew 确认按钮 (无论 Turnstile 状态如何)...');
@@ -889,13 +928,8 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                                     console.log(`   >> ⏳ 暂无法续期。下次可用时间: ${dateStr}`);
 
                                     // 截图证明
-                                    const fs = require('fs');
-                                    const path = require('path');
-                                    const photoDir = path.join(process.cwd(), 'screenshots');
-                                    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
                                     const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                                    const skipShotPath = path.join(photoDir, `${safeUser}_skip.png`);
-                                    try { await page.screenshot({ path: skipShotPath, fullPage: true }); } catch (e) { }
+                                    const skipShotPath = await saveShot(page, `${safeUser}_skip.png`);
 
                                     await sendTelegramMessage(`⏳ *暂无法续期 (跳过)*\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${dateStr}`, skipShotPath);
 
@@ -925,13 +959,8 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                             console.log('   >> ✅ Modal closed. Renew successful!');
 
                             // 截图成功状态
-                            const fs = require('fs');
-                            const path = require('path');
-                            const photoDir = path.join(process.cwd(), 'screenshots');
-                            if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
                             const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                            const successShotPath = path.join(photoDir, `${safeUser}_success.png`);
-                            try { await page.screenshot({ path: successShotPath, fullPage: true }); } catch (e) { }
+                            const successShotPath = await saveShot(page, `${safeUser}_success.png`);
 
                             await sendTelegramMessage(`✅ *续期成功*\n用户: ${user.username}\n状态: 服务器已成功续期！`, successShotPath);
                             renewSuccess = true;
@@ -960,19 +989,9 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
 
         // Snapshot before handling next user
         // In GitHub Actions, we save to 'screenshots' dir
-        const fs = require('fs');
-        const path = require('path');
-        const photoDir = path.join(process.cwd(), 'screenshots');
-        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-        // Use safe filename
         const safeUsername = user.username.replace(/[^a-z0-9]/gi, '_');
-        const screenshotPath = path.join(photoDir, `${safeUsername}.png`);
-        try {
-            await page.screenshot({ path: screenshotPath, fullPage: true });
-            console.log(`截图已保存至: ${screenshotPath}`);
-        } catch (e) {
-            console.log('截图失败:', e.message);
-        }
+        const screenshotPath = await saveShot(page, `${safeUsername}.png`);
+        if (screenshotPath) console.log(`截图已保存至: ${screenshotPath}`);
 
         console.log(`用户处理完成\n`);
     }
