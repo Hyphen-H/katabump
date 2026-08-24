@@ -195,6 +195,33 @@ def parse_vmess(url_str):
     return outbound
 
 
+def _pin_to_base64(pin):
+    pin = pin.strip().replace(":", "")
+    if not pin:
+        return ""
+    try:
+        if all(c in "0123456789abcdefABCDEF" for c in pin) and len(pin) == 64:
+            return base64.b64encode(bytes.fromhex(pin)).decode("ascii")
+        pad = 4 - len(pin) % 4
+        if pad != 4:
+            pin += "=" * pad
+        base64.b64decode(pin)
+        return pin
+    except Exception:
+        return ""
+
+
+def _parse_port_hop(raw):
+    ports = []
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        part = part.replace("-", ":")
+        ports.append(part)
+    return ports
+
+
 def parse_hysteria2(parsed, params):
     outbound = {
         "type": "hysteria2",
@@ -214,6 +241,10 @@ def parse_hysteria2(parsed, params):
     alpn = params.get("alpn", [""])[0]
     if alpn:
         tls["alpn"] = alpn.split(",")
+    pin = params.get("pinSHA256", params.get("pinsha256", [""]))[0]
+    pin_b64 = _pin_to_base64(unquote(pin))
+    if pin_b64:
+        tls["certificate_public_key_sha256"] = [pin_b64]
     outbound["tls"] = tls
 
     # Obfuscation (optional)
@@ -221,6 +252,13 @@ def parse_hysteria2(parsed, params):
     if obfs:
         obfs_pwd = params.get("obfs-password", [""])[0]
         outbound["obfs"] = {"type": obfs, "password": obfs_pwd}
+
+    # Port hopping: mport=60000-65530 or 60000:65530
+    mport = params.get("mport", params.get("ports", [""]))[0]
+    hop_ports = _parse_port_hop(unquote(mport)) if mport else []
+    if hop_ports:
+        outbound["server_ports"] = hop_ports
+        outbound["hop_interval"] = "30s"
 
     return outbound
 
@@ -314,9 +352,12 @@ def main():
 
     server = outbound.get("server", "N/A")
     port = outbound.get("server_port", "N/A")
+    extra = ""
+    if outbound.get("server_ports"):
+        extra = f" hop={outbound['server_ports']}"
     print(f"sing-box config.json generated.")
     print(f"  Inbound: http://{LISTEN_HOST}:{LISTEN_PORT}")
-    print(f"  Outbound: {outbound['type']} -> {server}:{port}")
+    print(f"  Outbound: {outbound['type']} -> {server}:{port}{extra}")
 
 
 if __name__ == "__main__":
